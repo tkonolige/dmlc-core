@@ -171,6 +171,9 @@ target_compile_definitions(dmlc PUBLIC -D__USE_XOPEN2K8)
 # DMLC_CORE_USE_CMAKE macro constant indicates the use of CMake
 target_compile_definitions(dmlc PUBLIC -DDMLC_CORE_USE_CMAKE)
 
+include(cmake/Backtrace.cmake)
+target_link_libraries(dmlc PUBLIC libbacktrace)
+
 # compiler flags
 if(MSVC)
   target_compile_definitions(dmlc PUBLIC -DDMLC_USE_CXX11=1)
