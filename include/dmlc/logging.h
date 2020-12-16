@@ -80,50 +80,73 @@ namespace {
   struct backtrace_info {
     std::vector<std::string> lines;
     size_t max_size;
+    bool error{false};
+    bool found_any{false};
   };
 
   static backtrace_state* backtrace_state = nullptr;
 
-inline void  backtrace_error(void *data, const char *msg,
-					  int errnum) {
-  auto stack_trace = reinterpret_cast<backtrace_info*>(data);
-  stack_trace->lines.push_back("Backtrace not avaliable: " + std::string(msg));
-}
-
-inline int backtrace_full_callback (void *data, uintptr_t pc,
-                                    const char *filename,
-                                    int lineno,
-                                    const char *symbol) {
-  auto stack_trace = reinterpret_cast<backtrace_info*>(data);
-  std::stringstream s;
-
-  if (filename != nullptr) {
-    s << filename;
-    if (lineno != 0) {
-     s << ":" << lineno;
-    }
-    s << " ";
+  inline std::string demangle_name(const char* name) {
+      int status = 0;
+      size_t length = std::string::npos;
+      std::unique_ptr<char, void (*)(void *__ptr)> demangled_name = {abi::__cxa_demangle(name, 0, &length, &status), &std::free};
+      if (demangled_name && status == 0 && length > 0) {
+        return demangled_name.get();
+      } else {
+        return name;
+      }
   }
 
-  std::string symbol_str;
-  if (symbol != nullptr){
-    int status = 0;
-    size_t length = std::string::npos;
-    std::unique_ptr<char, void (*)(void *__ptr)> demangled_symbol = {abi::__cxa_demangle(symbol, 0, &length, &status), &std::free};
-    if (demangled_symbol && status == 0 && length > 0) {
-      s << (demangled_symbol.get());
+  inline void backtrace_error(void *data, const char *msg,
+      int errnum) {
+    auto stack_trace = reinterpret_cast<backtrace_info*>(data);
+    stack_trace->error = true;
+  }
+
+  inline void backtrace_syminfo_callback(void *data, uintptr_t pc,
+      const char *symname,
+      uintptr_t symval,
+      uintptr_t symsize) {
+    auto stack_trace = reinterpret_cast<backtrace_info*>(data);
+
+    if(symname != nullptr) {
+      stack_trace->found_any = true;
+      stack_trace->lines.push_back(demangle_name(symname));
     } else {
-      s << symbol;
+      std::ostringstream s;
+      s << "0x" << std::setfill('0') << std::setw(sizeof(uintptr_t)*2) << std::hex << pc;
+      stack_trace->lines.push_back(s.str());
     }
-  } else {
-    s << "0x" << std::setfill('0') << std::setw(sizeof(uintptr_t)*2) << std::hex << pc;
   }
-  stack_trace->lines.push_back(s.str());
-  if (stack_trace->lines.size() >= stack_trace->max_size) {
-    return 1;
+  inline int backtrace_full_callback(void *data, uintptr_t pc,
+      const char *filename,
+      int lineno,
+      const char *symbol) {
+    auto stack_trace = reinterpret_cast<backtrace_info*>(data);
+    std::stringstream s;
+
+    if (filename != nullptr) {
+      s << filename;
+      if (lineno != 0) {
+        s << ":" << lineno;
+      }
+      s << " ";
+    }
+
+    std::string symbol_str;
+    if (symbol != nullptr){
+      s << demangle_name(symbol);
+      stack_trace->found_any = true;
+      stack_trace->lines.push_back(s.str());
+    } else {
+      // see if syminfo gives anything
+      backtrace_syminfo(backtrace_state, pc, backtrace_syminfo_callback, backtrace_error, data);
+    }
+    if (stack_trace->lines.size() >= stack_trace->max_size) {
+      return 1;
+    }
+    return 0;
   }
-  return 0;
-}
 
 }
 
@@ -133,6 +156,7 @@ inline std::string StackTrace(
     size_t start_frame = 1,
     const size_t stack_size = DMLC_LOG_STACK_TRACE_SIZE) {
 
+  // Attempt to use libbacktrace, but fall back to system backtrace if it fails.
   backtrace_info bt;
   bt.max_size = stack_size;
   if(backtrace_state == nullptr) {
@@ -140,37 +164,32 @@ inline std::string StackTrace(
   }
   backtrace_full(backtrace_state, start_frame, backtrace_full_callback, backtrace_error, &bt);
 
-  std::ostringstream s;
-  s << "Stack trace:\n";
-  int width = std::log10(bt.lines.size() - 1) + 1;
-  for(size_t i = 0; i < bt.lines.size(); i++) {
-    s << "  [bt] (" << std::setw(width) << i << ") " << bt.lines[i] << "\n";
-  }
-
-  std::string stack_trace = s.str();
-  std::cerr << stack_trace << std::endl;
-
-
-  using std::string;
-  std::ostringstream stacktrace_os;
-  std::vector<void*> stack(stack_size);
-  int nframes = backtrace(stack.data(), static_cast<int>(stack_size));
-  if (start_frame < static_cast<size_t>(nframes)) {
-    stacktrace_os << "Stack trace:\n";
-  }
-  char **msgs = backtrace_symbols(stack.data(), nframes);
-  if (msgs != nullptr) {
-    for (int frameno = start_frame; frameno < nframes; ++frameno) {
-      string msg = dmlc::Demangle(msgs[frameno]);
-      stacktrace_os << "  [bt] (" << frameno - start_frame << ") " << msg << "\n";
+  if(!bt.error && bt.found_any) {
+    std::ostringstream s;
+    s << "Stack trace:\n";
+    for(size_t i = 0; i < bt.lines.size(); i++) {
+      s << "  [bt] (" << i << ") " << bt.lines[i] << "\n";
     }
+
+    return s.str();
+  } else {
+    using std::string;
+    std::ostringstream stacktrace_os;
+    std::vector<void*> stack(stack_size);
+    int nframes = backtrace(stack.data(), static_cast<int>(stack_size));
+    if (start_frame < static_cast<size_t>(nframes)) {
+      stacktrace_os << "Stack trace:\n";
+    }
+    char **msgs = backtrace_symbols(stack.data(), nframes);
+    if (msgs != nullptr) {
+      for (int frameno = start_frame; frameno < nframes; ++frameno) {
+        string msg = dmlc::Demangle(msgs[frameno]);
+        stacktrace_os << "  [bt] (" << frameno - start_frame << ") " << msg << "\n";
+      }
+    }
+    free(msgs);
+    return stacktrace_os.str();
   }
-  free(msgs);
-  string stack_trace_1 = stacktrace_os.str();
-  std::cerr << stack_trace_1 << std::endl;
-
-
-  return stack_trace;
 }
 
 #else  // DMLC_LOG_STACK_TRACE is off
