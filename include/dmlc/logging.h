@@ -164,7 +164,7 @@ inline std::string StackTrace(
   }
   backtrace_full(backtrace_state, start_frame, backtrace_full_callback, backtrace_error, &bt);
 
-  if(!bt.error && bt.found_any) {
+  if(!bt.error || bt.found_any) {
     std::ostringstream s;
     s << "Stack trace:\n";
     for(size_t i = 0; i < bt.lines.size(); i++) {
